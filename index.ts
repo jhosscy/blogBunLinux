@@ -89,9 +89,9 @@ const handleHomeRoute = async (req: Request): Response => {
 };
 
 // Process blog post requests: load markdown file, parse it to HTML, and update the blog layout
-const handleBlogRoute = async (req: Request): Promise<Response> => {
-  const postTitle = req.params.title;
-  const postFilePath = `${Bun.cwd}/src/${postTitle}.md`;
+const handleBlogRoute = async (req: Request, title: string): Promise<Response> => {
+  const postTitle = title;
+  const postFilePath = `${Bun.cwd}/src//artixlinuxInstallation.md`;
   const postMarkdownFile = Bun.file(postFilePath);
   const postMarkdownContent = await postMarkdownFile.text();
   const postHtmlContent = marked.parse(postMarkdownContent);
@@ -180,11 +180,17 @@ const handleStaticFiles = async (request: Request): Promise<Response> => {
 
 // Initialize the Bun server with routes for home, blog posts, and static files
 const server = Bun.serve({
-  routes: {
-    '/': { GET: (req: Request) => handleHomeRoute(req) },
-    '/blog/:title': { GET: async (req: Request) => handleBlogRoute(req) },
-  },
   hostname: "::",
   port: process.env.PORT ?? 4321,
-  fetch: async (request: Request) => handleStaticFiles(request),
+  fetch: async (req: Request) => {
+    const pathname = new URL(req.url).pathname;
+    if (pathname === '/') {
+      return handleHomeRoute(req);
+    }
+    const match = pathname.match(/^\/blog\/([^\/]+)\/?$/);
+    if (match) {
+      return handleBlogRoute(req, match[1]);
+    }
+    return handleStaticFiles(req)
+  }
 });
