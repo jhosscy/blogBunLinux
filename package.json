@@ -1,0 +1,19 @@
+{
+  "name": "developerblog",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@std/encoding": "npm:@jsr/std__encoding",
+    "@std/media-types": "npm:@jsr/std__media-types",
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.7",
+    "marked-highlight": "^2.2.1"
+  }
+}
