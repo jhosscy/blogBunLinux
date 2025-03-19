@@ -1,8 +1,10 @@
+import { readdir } from 'node:fs/promises';
 import { Marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import { eTag, ifNoneMatch } from './etag.ts';
 import createResponseHeaders from './header.ts';
+import { parseYAMLFrontMatter } from './utils.ts';
 import mainLayoutHTML from './layouts/layout.html' with { type: 'text' };
 import blogLayoutHTML from './layouts/layoutBlog.html' with { type: 'text' };
 
@@ -22,23 +24,25 @@ const marked = new Marked(
 interface BlogCard {
   title: string;
   category: string;
-  link: string;
+  image: string;
+  slug: string;
 }
 
-const blogCards: BlogCard[] = [
-  { title: 'Instalación mínima de ArtixLinux', category: 'Instalación', link: 'artixlinuxInstallation', image: 'instalacion-minima.png' },
-  { title: 'Instalación de DWL en Wayland', category: 'Instalación', link: 'dwlInstallation', image: 'instalacion-dwl.png' },
-  { title: 'Instalación de PipeWire en ArtixLinux', category: 'Instalación', link: 'pipewireInstallation', image: 'instalacion-pipewire.png' },
-  { title: 'Configuración de Artix Linux', category: 'Configuración', link: 'configuringArtixLinux', image: 'configuracion-artixlinux.png' },
-  { title: 'Alacritty: Configuración para Desarrolladores', category: 'Configuración', link: 'alacrittyDeveloperSetup', image: 'configuracion-alacritty.png' },
-];
+// read all the files in the current directory
+const files = await readdir(`${Bun.cwd}/src`);
+const blogCards: BlogCard[] = await Promise.all(files.map(async (file) => {
+  const archive = Bun.file(`${Bun.cwd}/src/${file}`);
+  const content = await archive.text();
+  const metadata = parseYAMLFrontMatter(content)
+  return {...metadata, slug: file.split('.')[0]};
+}));
 
 // Generate HTML for blog cards to be inserted in the main layout
 function generateCardsHTML(cards: BlogCard[]): string {
   return cards
     .map((card) => `
       <article class="card">
-        <div class="card__image" style="background-image: url('${card.image}')">
+        <div class="card__image" style="background-image: url('/public/img/${card.image}')">
           <div class="card__image-overlay"></div>
         </div>
         <div class="card__content">
@@ -47,7 +51,7 @@ function generateCardsHTML(cards: BlogCard[]): string {
             <span class="card__date">15 Mayo 2023</span>
             <span class="card__tag">${card.category}</span>
           </div>
-          <a href="/blog/${card.link}" class="card__link">Leer guía</a>
+          <a href="/blog/${card.slug}" class="card__link">Leer guía</a>
         </div>
       </article>
     `)
@@ -55,7 +59,6 @@ function generateCardsHTML(cards: BlogCard[]): string {
 }
 
 const cardsHTMLContent = generateCardsHTML(blogCards);
-
 // Insert generated blog cards into the main layout's "posts-grid" div using HTMLRewriter
 const getTransformedMainLayout = (): string =>
   new HTMLRewriter().on('div.posts-grid', {
@@ -66,34 +69,16 @@ const getTransformedMainLayout = (): string =>
 
 const transformedMainLayout = getTransformedMainLayout();
 
-// Serve the home page with the transformed main layout
-const handleHomeRoute = async (req: Request): Response => {
-  const computedETag = await eTag(transformedMainLayout)
-  const ifNone = req.headers.get("if-none-match");
-  if (!ifNoneMatch(ifNone, computedETag)) {
-    return new Response(null, createResponseHeaders({
-      status: 304,
-      customHeaders: {
-        "Cache-Control": "must-revalidate"
-      }
-    }));
-  }
-  const headers = createResponseHeaders({
-    ext: 'html',       // La extensión del archivo para determinar el Content-Type
-    customHeaders: {   // Headers personalizados
-      "etag": computedETag,
-      "Cache-Control": "must-revalidate"
-    }
-  });
-  return new Response(transformedMainLayout, headers);
-};
-
 // Process blog post requests: load markdown file, parse it to HTML, and update the blog layout
-const handleBlogRoute = async (req: Request, title: string): Promise<Response> => {
-  const postTitle = title;
-  const postFilePath = `${Bun.cwd}/src//artixlinuxInstallation.md`;
+const handleBlogRoute = async (req: Request): Promise<Response> => {
+  const postTitle = req.params.title;
+  const postFilePath = `${Bun.cwd}/src/${postTitle}.md`;
   const postMarkdownFile = Bun.file(postFilePath);
-  const postMarkdownContent = await postMarkdownFile.text();
+  const removeFrontMatter = (content: string): string =>
+    content.startsWith('---')
+      ? content.replace(/^---[\s\S]*?---\s*/, '')
+      : content;
+  const postMarkdownContent = removeFrontMatter(await postMarkdownFile.text());
   const postHtmlContent = marked.parse(postMarkdownContent);
 
   // Update the blog layout with the post title and content using HTMLRewriter
@@ -128,69 +113,61 @@ const handleBlogRoute = async (req: Request, title: string): Promise<Response> =
   return new Response(transformedLayout, headers);
 };
 
-// Serve static files (images, CSS, JS) from the public directory
-const handleStaticFiles = async (request: Request): Promise<Response> => {
-  const requestedFile = request.url.split('/').pop() || '';
-  const fileExtension = requestedFile.split('.').pop() || '';
-  const publicFilePath = `${Bun.cwd}/public/${requestedFile}`;
-  const file = Bun.file(publicFilePath);
+const server = Bun.serve({
+  routes: {
+    '/': {
+      GET: () => new Response(transformedMainLayout, createResponseHeaders({ ext: 'html' }))
+    },
+    '/blog/:title': {
+      GET: (req: Request) => handleBlogRoute(req)
+    }
+  },
+  port: process.env.PORT ?? 4322,
+  fetch: async (req: Request) => {
+    const { pathname } = new URL(req.url);
+    const fileExtension = pathname.split('.').pop() || '';
+    const publicFilePath = `${Bun.cwd}${pathname}`;
+    const file = Bun.file(publicFilePath);
 
-  if (!(await file.exists())) {
-    return new Response('Archivo no encontrado', { status: 404 });
-  }
-  const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
-  if (imageExtensions.includes(fileExtension.toLowerCase())) {
+    if (!(await file.exists())) {
+      return new Response('Archivo no encontrado', { status: 404 });
+    }
+
     const arrayBuffer = await file.arrayBuffer();
     const uint8Array = new Uint8Array(arrayBuffer);
     const computedETag = await eTag(uint8Array);
-    const ifNone = request.headers.get("if-none-match");
+    const ifNone = req.headers.get("if-none-match");
+
+    const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+    if (imageExtensions.includes(fileExtension.toLowerCase())) {
+      if (!ifNoneMatch(ifNone, computedETag)) {
+        return new Response(null, createResponseHeaders({
+          status: 304
+        }));
+      }
+      const headers = createResponseHeaders({
+        ext: fileExtension,
+        customHeaders: {
+          "etag": computedETag,
+          "Cache-Control": "max-age=31536000,immutable"
+        }
+      });
+      return new Response(file, headers);
+    }
+
     if (!ifNoneMatch(ifNone, computedETag)) {
       return new Response(null, createResponseHeaders({
-        status: 304
+        status: 304,
+        "Cache-Control": "public,max-age=3600,must-revalidate"
       }));
     }
     const headers = createResponseHeaders({
       ext: fileExtension,
       customHeaders: {
         "etag": computedETag,
-        "Cache-Control": "max-age=31536000,immutable"
+        "Cache-Control": "public,max-age=3600,must-revalidate"
       }
     });
     return new Response(file, headers);
-  }
-
-  const fileContent = await file.text();
-  const computedETag = await eTag(fileContent);
-  const ifNone = request.headers.get("if-none-match");
-  if (!ifNoneMatch(ifNone, computedETag)) {
-    return new Response(null, createResponseHeaders({
-      status: 304,
-      "Cache-Control": "public,max-age=3600,must-revalidate"
-    }));
-  }
-  const headers = createResponseHeaders({
-    ext: fileExtension,
-    customHeaders: {
-      "etag": computedETag,
-      "Cache-Control": "public,max-age=3600,must-revalidate"
-    }
-  });
-  return new Response(fileContent, headers);
-};
-
-// Initialize the Bun server with routes for home, blog posts, and static files
-const server = Bun.serve({
-  hostname: "::",
-  port: process.env.PORT ?? 4321,
-  fetch: async (req: Request) => {
-    const pathname = new URL(req.url).pathname;
-    if (pathname === '/') {
-      return handleHomeRoute(req);
-    }
-    const match = pathname.match(/^\/blog\/([^\/]+)\/?$/);
-    if (match) {
-      return handleBlogRoute(req, match[1]);
-    }
-    return handleStaticFiles(req)
   }
 });
